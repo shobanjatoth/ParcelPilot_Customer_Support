@@ -51,37 +51,6 @@ graph TD
     style Response fill:#f0f9ff,stroke:#0ea5e9
 ```
 
-### Data Flow
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant UI as React UI
-    participant API as FastAPI
-    participant Agent as Agent
-    participant LLM as Gemini
-    participant DB as Database
-    participant VDB as ChromaDB
-
-    U->>UI: Types message
-    UI->>API: POST /chat {message, user_id}
-    API->>API: Authenticate user
-    API->>Agent: Run agent with query
-
-    Agent->>Agent: Extract entities (account, order, ticket)
-    Agent->>DB: Fetch structured data
-    DB-->>Agent: Account, order, ticket records
-    Agent->>VDB: Search policy documents
-    VDB-->>Agent: Ranked citations
-    Agent->>LLM: Compose response with context
-    LLM-->>Agent: Natural language response
-
-    Agent-->>API: Response + citations + confidence
-    API->>API: Log to audit trail
-    API-->>UI: JSON response
-    UI-->>U: Rendered message with sources
-```
-
 ## Tech Stack
 
 | Component | Technology |
