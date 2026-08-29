@@ -1,296 +1,39 @@
-# import json
-# import re
-# import time
-# import logging
-# from app.agent.state import AgentState
-# from app.agent.prompts import SYSTEM_PROMPT
-# from app.tools.documents import search_documents_tool
-# from app.tools.operations import (
-#     get_account_tool,
-#     get_order_tool,
-#     get_ticket_tool,
-#     get_sla_status_tool,
-#     get_orders_by_account_tool,
-#     get_tickets_by_account_tool,
-# )
-# from app.tools.actions import (
-#     create_escalation_tool,
-#     update_ticket_tool,
-#     create_followup_task_tool,
-# )
-# from app.services.retrieval import RetrievalService
-# from app.data.repository import Repository
-# from app.security.auth import UserContext, is_internal, can_access_account
-# from typing import Optional
-# import httpx
-# from app.config import get_settings
+from __future__ import annotations
 
-# logger = logging.getLogger("parcelpilot.agent")
-
-# _INJECTION_PATTERNS = [
-#     r"ignore\s+(previous|all|above)\s+(instructions?|prompts?|rules?)",
-#     r"you\s+are\s+now\s+",
-#     r"system\s*:\s*",
-#     r"act\s+as\s+",
-#     r"pretend\s+you\s+are\s+",
-#     r"disregard\s+(previous|all|above)",
-#     r"override\s+(previous|all|above)",
-#     r"new\s+instructions?\s*:",
-#     r"forget\s+(everything|all|previous)",
-# ]
-
-
-# def sanitize_query(query: str) -> str:
-#     sanitized = query.strip()
-#     if len(sanitized) > 2000:
-#         sanitized = sanitized[:2000]
-#     for pattern in _INJECTION_PATTERNS:
-#         import re as _re
-#         if _re.search(pattern, sanitized, _re.IGNORECASE):
-#             logger.warning(f"Potential injection attempt detected: {sanitized[:100]}")
-#             break
-#     return sanitized
-
-
-# def extract_account_id(query: str) -> Optional[str]:
-#     patterns = [
-#         (r"northstar", "ACCT-001"),
-#         (r"lumenworks", "ACCT-002"),
-#         (r"beacon", "ACCT-003"),
-#         (r"axis\s*labs", "ACCT-004"),
-#         (r"ACCT-\d+", None),
-#     ]
-#     for pattern, override in patterns:
-#         if re.search(pattern, query, re.IGNORECASE):
-#             if override:
-#                 return override
-#             match = re.search(r"ACCT-\d+", query)
-#             if match:
-#                 return match.group()
-#     return None
-
-
-# def extract_order_id(query: str) -> Optional[str]:
-#     match = re.search(r"ORD-\d+", query)
-#     return match.group() if match else None
-
-
-# def extract_ticket_id(query: str) -> Optional[str]:
-#     match = re.search(r"TKT-\d+", query)
-#     return match.group() if match else None
-
-
-# def call_llm(messages: list[dict]) -> str:
-#     settings = get_settings()
-#     start = time.time()
-#     try:
-#         response = httpx.post(
-#             f"{settings.openrouter_base_url}/chat/completions",
-#             headers={
-#                 "Authorization": f"Bearer {settings.openrouter_api_key}",
-#                 "Content-Type": "application/json",
-#             },
-#             json={
-#                 "model": settings.llm_model,
-#                 "messages": messages,
-#                 "max_tokens": 2000,
-#                 "temperature": 0.1,
-#             },
-#             timeout=60.0,
-#         )
-#         response.raise_for_status()
-#         content = response.json()["choices"][0]["message"]["content"]
-#         logger.info(f"LLM call ok latency={round(time.time()-start, 2)}s model={settings.llm_model}")
-#         return content
-#     except Exception as e:
-#         logger.error(f"LLM call failed latency={round(time.time()-start, 2)}s error={e}")
-#         return f"Error calling LLM: {str(e)}"
-
-
-# def run_agent(
-#     state: AgentState,
-#     repo: Repository,
-#     retrieval: RetrievalService,
-# ) -> AgentState:
-#     query = sanitize_query(state.user_query)
-#     state.user_query = query
-#     user = state.user
-
-#     account_id = extract_account_id(query)
-#     order_id = extract_order_id(query)
-#     ticket_id = extract_ticket_id(query)
-
-#     logger.info(f"agent query user={user.user_id} account={account_id} order={order_id} ticket={ticket_id}")
-
-#     if account_id and not can_access_account(user, account_id):
-#         state.response = "Access denied: you do not have permission to access this account's data."
-#         state.confidence = "high"
-#         return state
-
-#     if account_id:
-#         state.account_id = account_id
-#         state.reasoning_steps.append(f"Identified account: {account_id}")
-
-#     tool_calls = []
-
-#     if account_id:
-#         result = get_account_tool(repo, user, account_id)
-#         state.structured_data["account"] = result
-#         tool_calls.append(("get_account", result))
-#         state.reasoning_steps.append(f"Retrieved account details for {account_id}")
-
-#     if order_id:
-#         result = get_order_tool(repo, user, order_id)
-#         state.structured_data["order"] = result
-#         tool_calls.append(("get_order", result))
-#         state.reasoning_steps.append(f"Retrieved order {order_id}")
-
-#     if ticket_id:
-#         result = get_ticket_tool(repo, user, ticket_id)
-#         state.structured_data["ticket"] = result
-#         tool_calls.append(("get_ticket", result))
-#         state.reasoning_steps.append(f"Retrieved ticket {ticket_id}")
-
-#     if account_id and not order_id and not ticket_id:
-#         orders_result = get_orders_by_account_tool(repo, user, account_id)
-#         state.structured_data["orders"] = orders_result
-#         tool_calls.append(("get_orders_by_account", orders_result))
-
-#         tickets_result = get_tickets_by_account_tool(repo, user, account_id)
-#         state.structured_data["tickets"] = tickets_result
-#         tool_calls.append(("get_tickets_by_account", tickets_result))
-
-#     doc_result = search_documents_tool(retrieval, user, query, account_id)
-#     state.retrieved_docs = doc_result.get("citations", [])
-#     state.citations = doc_result.get("citations", [])
-#     state.conflicts = doc_result.get("conflicts", [])
-#     tool_calls.append(("search_documents", doc_result))
-#     state.reasoning_steps.append(f"Searched documents: {doc_result.get('result_count', 0)} results")
-
-#     if not account_id and not order_id and not ticket_id:
-#         doc_result_no_account = search_documents_tool(retrieval, user, query)
-#         if doc_result_no_account.get("result_count", 0) > len(state.citations):
-#             state.citations = doc_result_no_account.get("citations", [])
-
-#     state.tool_calls = tool_calls
-#     logger.info(f"agent tools_called={[t[0] for t in tool_calls]}")
-
-#     doc_context = ""
-#     for c in state.citations[:5]:
-#         doc_context += f"\n- {c['document']} (Page {c['page']}, Authority: {c['authority']}): {c['excerpt']}"
-
-#     data_context = ""
-#     if state.structured_data.get("account"):
-#         acc = state.structured_data["account"].get("account", {})
-#         if acc:
-#             data_context += f"\nAccount: {acc.get('account_name')} ({acc.get('account_id')}) - Plan: {acc.get('plan')}"
-#     if state.structured_data.get("order"):
-#         ord_data = state.structured_data["order"].get("order", {})
-#         if ord_data:
-#             data_context += f"\nOrder: {ord_data.get('order_id')} - Status: {ord_data.get('status')} - Carrier: {ord_data.get('carrier')}"
-#             if ord_data.get("cancellation_requested_at"):
-#                 data_context += f" - Cancellation requested: {ord_data.get('cancellation_requested_at')}"
-#             if ord_data.get("carrier_fault"):
-#                 data_context += " - CARRIER AT FAULT"
-#             data_context += f" - Fee: INR {ord_data.get('shipment_fee_inr', 0)}"
-#             data_context += f" - Notes: {ord_data.get('notes', 'N/A')}"
-#     if state.structured_data.get("orders"):
-#         orders_list = state.structured_data["orders"].get("orders", [])
-#         if orders_list:
-#             data_context += f"\nOrders for account ({len(orders_list)} total):"
-#             for o in orders_list[:10]:
-#                 data_context += f"\n  - {o.get('order_id')}: {o.get('status')}, Carrier: {o.get('carrier')}, Fee: INR {o.get('shipment_fee_inr', 0)}"
-#                 if o.get("carrier_fault"):
-#                     data_context += " [CARRIER FAULT]"
-#     if state.structured_data.get("ticket"):
-#         tkt = state.structured_data["ticket"].get("ticket", {})
-#         if tkt:
-#             data_context += f"\nTicket: {tkt.get('ticket_id')} - Status: {tkt.get('status')} - Subject: {tkt.get('subject')}"
-#             if tkt.get("historical_resolution"):
-#                 data_context += f" - Historical resolution: {tkt.get('historical_resolution')}"
-#     if state.structured_data.get("tickets"):
-#         tickets_list = state.structured_data["tickets"].get("tickets", [])
-#         if tickets_list:
-#             data_context += f"\nTickets for account ({len(tickets_list)} total):"
-#             for t in tickets_list[:10]:
-#                 data_context += f"\n  - {t.get('ticket_id')}: {t.get('status')}, Subject: {t.get('subject')}"
-
-#     messages = [
-#         {"role": "system", "content": SYSTEM_PROMPT},
-#         {"role": "user", "content": f"""User query: {query}
-
-# Data retrieved:
-# {data_context if data_context else "No structured data retrieved."}
-
-# Documents retrieved:
-# {doc_context if doc_context else "No documents retrieved."}
-
-# Conflicts: {json.dumps(state.conflicts) if state.conflicts else "None"}
-
-# Answer the user directly and briefly using the data above."""},
-#     ]
-
-#     llm_response = call_llm(messages)
-
-#     if any(keyword in query.lower() for keyword in ["escalat", "update ticket", "follow-up", "follow up"]):
-#         if "escalat" in query.lower():
-#             if ticket_id:
-#                 action_result = create_escalation_tool(repo, user, ticket_id, reason="Customer-requested escalation", priority="high", team="Support")
-#                 state.pending_actions.append(action_result)
-#             elif state.structured_data.get("ticket"):
-#                 tkt = state.structured_data["ticket"].get("ticket", {})
-#                 if tkt:
-#                     action_result = create_escalation_tool(repo, user, tkt["ticket_id"], reason="Customer-requested escalation", priority="high", team="Support")
-#                     state.pending_actions.append(action_result)
-
-#     state.response = llm_response
-#     state.confidence = "high" if state.citations and state.structured_data else "medium"
-#     if state.conflicts:
-#         state.confidence = "medium"
-#     if not state.citations and not state.structured_data:
-#         state.confidence = "low"
-
-#     return state
-
-
-
-import json
+import logging
 import re
 import time
-import logging
 from typing import Optional
 
 import httpx
 
-from app.agent.state import AgentState
 from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.state import AgentState
+from app.config import get_settings
+from app.data.repository import Repository
+from app.security.auth import can_access_account, is_internal
+from app.services.retrieval import RetrievalService
+from app.tools.actions import create_escalation_tool
 from app.tools.documents import search_documents_tool
 from app.tools.operations import (
     get_account_tool,
     get_order_tool,
-    get_ticket_tool,
-    get_sla_status_tool,
     get_orders_by_account_tool,
+    get_ticket_tool,
     get_tickets_by_account_tool,
 )
-from app.tools.actions import (
-    create_escalation_tool,
-    update_ticket_tool,
-    create_followup_task_tool,
-)
-from app.services.retrieval import RetrievalService
-from app.data.repository import Repository
-from app.security.auth import UserContext, is_internal, can_access_account
-from app.config import get_settings
-
 
 logger = logging.getLogger("parcelpilot.agent")
 
 
+# ============================================================
+# Input Security
+# ============================================================
+
 _INJECTION_PATTERNS = [
     r"ignore\s+(previous|all|above)\s+(instructions?|prompts?|rules?)",
     r"you\s+are\s+now\s+",
-    r"system\s*:\s*",
+    r"system\s*:",
     r"act\s+as\s+",
     r"pretend\s+you\s+are\s+",
     r"disregard\s+(previous|all|above)",
@@ -301,7 +44,18 @@ _INJECTION_PATTERNS = [
 
 
 def sanitize_query(query: str) -> str:
-    """Sanitize and limit user query length."""
+    """
+    Normalize and limit user input.
+
+    Detection of prompt injection is logged, but the query is not
+    silently rewritten because changing user intent can be dangerous.
+    Retrieved documents are treated as untrusted data by the system
+    prompt.
+    """
+
+    if not isinstance(query, str):
+        return ""
+
     sanitized = query.strip()
 
     if len(sanitized) > 2000:
@@ -311,158 +65,396 @@ def sanitize_query(query: str) -> str:
         if re.search(pattern, sanitized, re.IGNORECASE):
             logger.warning(
                 "Potential prompt injection detected: %s",
-                sanitized[:100],
+                sanitized[:200],
             )
             break
 
     return sanitized
 
 
+# ============================================================
+# Entity Extraction
+# ============================================================
+
 def extract_account_id(query: str) -> Optional[str]:
-    """Extract account ID from the user query."""
+    """
+    Extract a known ParcelPilot account identifier from the query.
+    """
+
     patterns = [
-        (r"northstar", "ACCT-001"),
-        (r"lumenworks", "ACCT-002"),
-        (r"beacon", "ACCT-003"),
-        (r"axis\s*labs", "ACCT-004"),
-        (r"ACCT-\d+", None),
+        (r"\bnorthstar\b", "ACCT-001"),
+        (r"\blumenworks\b", "ACCT-002"),
+        (r"\bbeacon\b", "ACCT-003"),
+        (r"\baxis\s*labs\b", "ACCT-004"),
+        (r"\bACCT-\d+\b", None),
     ]
 
-    for pattern, override in patterns:
-        if re.search(pattern, query, re.IGNORECASE):
-            if override:
-                return override
+    for pattern, account_override in patterns:
+        match = re.search(pattern, query, re.IGNORECASE)
 
-            match = re.search(r"ACCT-\d+", query, re.IGNORECASE)
-            if match:
-                return match.group().upper()
+        if not match:
+            continue
+
+        if account_override:
+            return account_override
+
+        return match.group(0).upper()
 
     return None
 
 
 def extract_order_id(query: str) -> Optional[str]:
-    """Extract order ID from the user query."""
-    match = re.search(r"ORD-\d+", query, re.IGNORECASE)
+    match = re.search(r"\bORD-\d+\b", query, re.IGNORECASE)
 
-    if match:
-        return match.group().upper()
+    if not match:
+        return None
 
-    return None
+    return match.group(0).upper()
 
 
 def extract_ticket_id(query: str) -> Optional[str]:
-    """Extract ticket ID from the user query."""
-    match = re.search(r"TKT-\d+", query, re.IGNORECASE)
+    match = re.search(r"\bTKT-\d+\b", query, re.IGNORECASE)
 
-    if match:
-        return match.group().upper()
+    if not match:
+        return None
 
-    return None
+    return match.group(0).upper()
 
+
+# ============================================================
+# LLM
+# ============================================================
 
 def call_llm(messages: list[dict]) -> str:
     """
-    Call Google Gemini using Google's OpenAI-compatible API.
-
-    Gemini endpoint:
-    https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+    Call Gemini through its OpenAI-compatible API endpoint.
     """
+
     settings = get_settings()
-    start = time.time()
 
-    try:
-        base_url = settings.gemini_base_url.rstrip("/")
-        url = f"{base_url}/chat/completions"
-
-        headers = {
-            "Authorization": f"Bearer {settings.gemini_api_key}",
-            "Content-Type": "application/json",
-        }
-
-        payload = {
-            "model": settings.llm_model,
-            "messages": messages,
-            "max_tokens": 2000,
-            "temperature": 0.1,
-        }
-
-        logger.info(
-            "Calling Gemini provider=%s model=%s",
-            settings.llm_provider,
-            settings.llm_model,
+    if not settings.gemini_api_key:
+        logger.error("GEMINI_API_KEY is not configured")
+        return (
+            "The AI service is not configured correctly. "
+            "Please contact support."
         )
 
+    start = time.perf_counter()
+
+    try:
         response = httpx.post(
-            url,
-            headers=headers,
-            json=payload,
+            f"{settings.gemini_base_url.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.gemini_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.llm_model,
+                "messages": messages,
+                "max_tokens": 2000,
+                "temperature": 0.1,
+            },
             timeout=60.0,
         )
 
         response.raise_for_status()
 
-        data = response.json()
+        payload = response.json()
 
-        content = data["choices"][0]["message"]["content"]
+        choices = payload.get("choices", [])
 
-        latency = round(time.time() - start, 2)
+        if not choices:
+            logger.error("Gemini returned no choices")
+            return (
+                "I could not generate a response from the AI service."
+            )
+
+        message = choices[0].get("message", {})
+        content = message.get("content")
+
+        if not content:
+            logger.error("Gemini returned an empty response")
+            return (
+                "I could not generate a response from the AI service."
+            )
+
+        latency = round(time.perf_counter() - start, 3)
 
         logger.info(
-            "Gemini LLM call successful latency=%ss model=%s",
-            latency,
+            "LLM call successful model=%s latency=%ss",
             settings.llm_model,
+            latency,
         )
 
-        return content
+        return str(content).strip()
+
+    except httpx.TimeoutException:
+        logger.error("LLM request timed out")
+
+        return (
+            "The AI service took too long to respond. "
+            "Please try again."
+        )
 
     except httpx.HTTPStatusError as exc:
-        latency = round(time.time() - start, 2)
-
         logger.error(
-            "Gemini API error status=%s latency=%ss response=%s",
+            "LLM HTTP error status=%s response=%s",
             exc.response.status_code,
-            latency,
             exc.response.text[:500],
         )
 
         return (
-            f"Error calling LLM: "
-            f"Gemini API returned HTTP {exc.response.status_code}: "
-            f"{exc.response.text[:500]}"
+            "The AI service is temporarily unavailable. "
+            "Please try again later."
         )
 
-    except httpx.TimeoutException:
-        logger.error("Gemini API request timed out")
-
-        return "Error calling LLM: Gemini request timed out."
-
-    except httpx.ConnectError as exc:
-        logger.error("Gemini connection error: %s", exc)
-
-        return f"Error calling LLM: Connection error - {str(exc)}"
-
-    except KeyError as exc:
+    except (httpx.RequestError, ValueError) as exc:
         logger.error(
-            "Unexpected Gemini response format: missing key=%s",
+            "LLM request failed error=%s",
             exc,
         )
 
-        return "Error calling LLM: Unexpected response format from Gemini."
+        return (
+            "I could not connect to the AI service. "
+            "Please try again later."
+        )
 
-    except Exception as exc:
-        logger.exception("Unexpected Gemini LLM error")
+    except Exception:
+        logger.exception("Unexpected LLM failure")
 
-        return f"Error calling LLM: {str(exc)}"
+        return (
+            "An unexpected error occurred while generating "
+            "the response."
+        )
 
+
+# ============================================================
+# Context Construction
+# ============================================================
+
+def _build_document_context(citations: list[dict]) -> str:
+    """
+    Build a compact context from retrieved citations.
+    """
+
+    if not citations:
+        return "No documents retrieved."
+
+    context_parts: list[str] = []
+
+    for citation in citations[:5]:
+        document = citation.get("document", "Unknown")
+        page = citation.get("page", 0)
+        authority = citation.get("authority", 50)
+        excerpt = citation.get("excerpt", "")
+
+        context_parts.append(
+            f"- {document} "
+            f"(Page {page}, Authority: {authority}): "
+            f"{excerpt}"
+        )
+
+    return "\n".join(context_parts)
+
+
+def _build_data_context(structured_data: dict) -> str:
+    """
+    Convert structured tool results into concise LLM context.
+    """
+
+    context: list[str] = []
+
+    # --------------------------------------------------------
+    # Account
+    # --------------------------------------------------------
+
+    account_result = structured_data.get("account")
+
+    if account_result:
+        account = account_result.get("account", {})
+
+        if account:
+            context.append(
+                "Account: "
+                f"{account.get('account_name')} "
+                f"({account.get('account_id')}) - "
+                f"Plan: {account.get('plan')}"
+            )
+
+    # --------------------------------------------------------
+    # Single Order
+    # --------------------------------------------------------
+
+    order_result = structured_data.get("order")
+
+    if order_result:
+        order = order_result.get("order", {})
+
+        if order:
+            order_context = (
+                f"Order: {order.get('order_id')} - "
+                f"Status: {order.get('status')} - "
+                f"Carrier: {order.get('carrier')} - "
+                f"Fee: INR {order.get('shipment_fee_inr', 0)}"
+            )
+
+            if order.get("carrier_fault"):
+                order_context += " - Carrier fault: YES"
+
+            if order.get("customer_fault"):
+                order_context += " - Customer fault: YES"
+
+            if order.get("cancellation_requested_at"):
+                order_context += (
+                    " - Cancellation requested: "
+                    f"{order.get('cancellation_requested_at')}"
+                )
+
+            if order.get("notes"):
+                order_context += (
+                    f" - Notes: {order.get('notes')}"
+                )
+
+            context.append(order_context)
+
+    # --------------------------------------------------------
+    # Multiple Orders
+    # --------------------------------------------------------
+
+    orders_result = structured_data.get("orders")
+
+    if orders_result:
+        orders = orders_result.get("orders", [])
+
+        if orders:
+            context.append(
+                f"Orders for account ({len(orders)} total):"
+            )
+
+            for order in orders[:10]:
+                line = (
+                    f"  - {order.get('order_id')}: "
+                    f"{order.get('status')}, "
+                    f"Carrier: {order.get('carrier')}, "
+                    f"Fee: INR {order.get('shipment_fee_inr', 0)}"
+                )
+
+                if order.get("carrier_fault"):
+                    line += " [CARRIER FAULT]"
+
+                context.append(line)
+
+    # --------------------------------------------------------
+    # Single Ticket
+    # --------------------------------------------------------
+
+    ticket_result = structured_data.get("ticket")
+
+    if ticket_result:
+        ticket = ticket_result.get("ticket", {})
+
+        if ticket:
+            ticket_context = (
+                f"Ticket: {ticket.get('ticket_id')} - "
+                f"Status: {ticket.get('status')} - "
+                f"Subject: {ticket.get('subject')}"
+            )
+
+            if ticket.get("assigned_to"):
+                ticket_context += (
+                    f" - Assigned to: {ticket.get('assigned_to')}"
+                )
+
+            if ticket.get("historical_resolution"):
+                ticket_context += (
+                    " - Historical resolution: "
+                    f"{ticket.get('historical_resolution')}"
+                )
+
+            context.append(ticket_context)
+
+    # --------------------------------------------------------
+    # Multiple Tickets
+    # --------------------------------------------------------
+
+    tickets_result = structured_data.get("tickets")
+
+    if tickets_result:
+        tickets = tickets_result.get("tickets", [])
+
+        if tickets:
+            context.append(
+                f"Tickets for account ({len(tickets)} total):"
+            )
+
+            for ticket in tickets[:10]:
+                line = (
+                    f"  - {ticket.get('ticket_id')}: "
+                    f"{ticket.get('status')}, "
+                    f"Subject: {ticket.get('subject')}"
+                )
+
+                context.append(line)
+
+    if not context:
+        return "No structured data retrieved."
+
+    return "\n".join(context)
+
+
+# ============================================================
+# Tool Helpers
+# ============================================================
+
+def _record_tool_call(
+    state: AgentState,
+    name: str,
+    result: dict,
+) -> None:
+    """
+    Store tool execution information for observability.
+    """
+
+    state.tool_calls.append(
+        {
+            "tool": name,
+            "result": result,
+        }
+    )
+
+
+# ============================================================
+# Main Agent
+# ============================================================
 
 def run_agent(
     state: AgentState,
     repo: Repository,
     retrieval: RetrievalService,
 ) -> AgentState:
-    """Run the ParcelPilot support agent."""
+    """
+    Execute one ParcelPilot support request.
+
+    The agent performs:
+        1. Input sanitization
+        2. Entity extraction
+        3. Authorization
+        4. Structured-data retrieval
+        5. Document retrieval
+        6. LLM response generation
+        7. Optional pending action creation
+
+    State-changing actions are never directly executed here.
+    They remain pending until explicitly confirmed.
+    """
 
     query = sanitize_query(state.user_query)
+
+    if not query:
+        state.response = "Please provide a question or request."
+        state.confidence = "high"
+        return state
+
     state.user_query = query
 
     user = state.user
@@ -472,39 +464,39 @@ def run_agent(
     ticket_id = extract_ticket_id(query)
 
     logger.info(
-        "Agent query user=%s account=%s order=%s ticket=%s",
+        "Agent request user=%s account=%s order=%s ticket=%s",
         user.user_id,
         account_id,
         order_id,
         ticket_id,
     )
 
-    # ---------------------------------------------------------
+    # ========================================================
     # Authorization
-    # ---------------------------------------------------------
+    # ========================================================
 
     if account_id and not can_access_account(user, account_id):
+        logger.warning(
+            "Unauthorized account access user=%s account=%s",
+            user.user_id,
+            account_id,
+        )
+
         state.response = (
             "Access denied: you do not have permission "
             "to access this account's data."
         )
         state.confidence = "high"
+
         return state
+
+    # ========================================================
+    # Account
+    # ========================================================
 
     if account_id:
         state.account_id = account_id
-        state.reasoning_steps.append(
-            f"Identified account: {account_id}"
-        )
 
-    # ---------------------------------------------------------
-    # Tool execution
-    # ---------------------------------------------------------
-
-    tool_calls = []
-
-    # Account lookup
-    if account_id:
         result = get_account_tool(
             repo,
             user,
@@ -513,15 +505,16 @@ def run_agent(
 
         state.structured_data["account"] = result
 
-        tool_calls.append(
-            ("get_account", result)
+        _record_tool_call(
+            state,
+            "get_account",
+            result,
         )
 
-        state.reasoning_steps.append(
-            f"Retrieved account details for {account_id}"
-        )
+    # ========================================================
+    # Single Order
+    # ========================================================
 
-    # Specific order lookup
     if order_id:
         result = get_order_tool(
             repo,
@@ -531,15 +524,16 @@ def run_agent(
 
         state.structured_data["order"] = result
 
-        tool_calls.append(
-            ("get_order", result)
+        _record_tool_call(
+            state,
+            "get_order",
+            result,
         )
 
-        state.reasoning_steps.append(
-            f"Retrieved order {order_id}"
-        )
+    # ========================================================
+    # Single Ticket
+    # ========================================================
 
-    # Specific ticket lookup
     if ticket_id:
         result = get_ticket_tool(
             repo,
@@ -549,15 +543,16 @@ def run_agent(
 
         state.structured_data["ticket"] = result
 
-        tool_calls.append(
-            ("get_ticket", result)
+        _record_tool_call(
+            state,
+            "get_ticket",
+            result,
         )
 
-        state.reasoning_steps.append(
-            f"Retrieved ticket {ticket_id}"
-        )
+    # ========================================================
+    # Account-level Orders and Tickets
+    # ========================================================
 
-    # Account-level orders and tickets
     if account_id and not order_id and not ticket_id:
         orders_result = get_orders_by_account_tool(
             repo,
@@ -567,8 +562,10 @@ def run_agent(
 
         state.structured_data["orders"] = orders_result
 
-        tool_calls.append(
-            ("get_orders_by_account", orders_result)
+        _record_tool_call(
+            state,
+            "get_orders_by_account",
+            orders_result,
         )
 
         tickets_result = get_tickets_by_account_tool(
@@ -579,207 +576,71 @@ def run_agent(
 
         state.structured_data["tickets"] = tickets_result
 
-        tool_calls.append(
-            ("get_tickets_by_account", tickets_result)
+        _record_tool_call(
+            state,
+            "get_tickets_by_account",
+            tickets_result,
         )
 
-    # ---------------------------------------------------------
-    # Document retrieval
-    # ---------------------------------------------------------
+    # ========================================================
+    # Document Retrieval
+    # ========================================================
 
-    doc_result = search_documents_tool(
-        retrieval,
-        user,
-        query,
-        account_id,
+    document_result = search_documents_tool(
+        retrieval=retrieval,
+        user=user,
+        query=query,
+        account_id=account_id,
     )
 
-    state.retrieved_docs = doc_result.get(
+    state.retrieved_docs = document_result.get(
         "citations",
         [],
     )
 
-    state.citations = doc_result.get(
+    state.citations = document_result.get(
         "citations",
         [],
     )
 
-    state.conflicts = doc_result.get(
+    state.conflicts = document_result.get(
         "conflicts",
         [],
     )
 
-    tool_calls.append(
-        ("search_documents", doc_result)
+    _record_tool_call(
+        state,
+        "search_documents",
+        document_result,
     )
-
-    state.reasoning_steps.append(
-        f"Searched documents: "
-        f"{doc_result.get('result_count', 0)} results"
-    )
-
-    # Search again without account restriction if no account
-    if not account_id and not order_id and not ticket_id:
-        doc_result_no_account = search_documents_tool(
-            retrieval,
-            user,
-            query,
-        )
-
-        if (
-            doc_result_no_account.get("result_count", 0)
-            > len(state.citations)
-        ):
-            state.citations = doc_result_no_account.get(
-                "citations",
-                [],
-            )
-
-    state.tool_calls = tool_calls
 
     logger.info(
-        "Agent tools_called=%s",
-        [tool[0] for tool in tool_calls],
+        "Document retrieval results=%s conflicts=%s",
+        document_result.get("result_count", 0),
+        len(state.conflicts),
     )
 
-    # ---------------------------------------------------------
-    # Build document context
-    # ---------------------------------------------------------
+    # ========================================================
+    # Context
+    # ========================================================
 
-    doc_context = ""
+    data_context = _build_data_context(
+        state.structured_data
+    )
 
-    for citation in state.citations[:5]:
-        doc_context += (
-            f"\n- {citation['document']} "
-            f"(Page {citation['page']}, "
-            f"Authority: {citation['authority']}): "
-            f"{citation['excerpt']}"
-        )
+    document_context = _build_document_context(
+        state.citations
+    )
 
-    # ---------------------------------------------------------
-    # Build structured data context
-    # ---------------------------------------------------------
+    conflict_context = (
+        str(state.conflicts)
+        if state.conflicts
+        else "None"
+    )
 
-    data_context = ""
-
-    # Account
-    if state.structured_data.get("account"):
-        account = state.structured_data["account"].get(
-            "account",
-            {},
-        )
-
-        if account:
-            data_context += (
-                f"\nAccount: "
-                f"{account.get('account_name')} "
-                f"({account.get('account_id')}) "
-                f"- Plan: {account.get('plan')}"
-            )
-
-    # Single order
-    if state.structured_data.get("order"):
-        order = state.structured_data["order"].get(
-            "order",
-            {},
-        )
-
-        if order:
-            data_context += (
-                f"\nOrder: "
-                f"{order.get('order_id')} "
-                f"- Status: {order.get('status')} "
-                f"- Carrier: {order.get('carrier')}"
-            )
-
-            if order.get("cancellation_requested_at"):
-                data_context += (
-                    " - Cancellation requested: "
-                    f"{order.get('cancellation_requested_at')}"
-                )
-
-            if order.get("carrier_fault"):
-                data_context += " - CARRIER AT FAULT"
-
-            data_context += (
-                f" - Fee: INR "
-                f"{order.get('shipment_fee_inr', 0)}"
-            )
-
-            data_context += (
-                f" - Notes: "
-                f"{order.get('notes', 'N/A')}"
-            )
-
-    # Multiple orders
-    if state.structured_data.get("orders"):
-        orders_list = state.structured_data["orders"].get(
-            "orders",
-            [],
-        )
-
-        if orders_list:
-            data_context += (
-                f"\nOrders for account "
-                f"({len(orders_list)} total):"
-            )
-
-            for order in orders_list[:10]:
-                data_context += (
-                    f"\n  - {order.get('order_id')}: "
-                    f"{order.get('status')}, "
-                    f"Carrier: {order.get('carrier')}, "
-                    f"Fee: INR "
-                    f"{order.get('shipment_fee_inr', 0)}"
-                )
-
-                if order.get("carrier_fault"):
-                    data_context += " [CARRIER FAULT]"
-
-    # Single ticket
-    if state.structured_data.get("ticket"):
-        ticket = state.structured_data["ticket"].get(
-            "ticket",
-            {},
-        )
-
-        if ticket:
-            data_context += (
-                f"\nTicket: "
-                f"{ticket.get('ticket_id')} "
-                f"- Status: {ticket.get('status')} "
-                f"- Subject: {ticket.get('subject')}"
-            )
-
-            if ticket.get("historical_resolution"):
-                data_context += (
-                    " - Historical resolution: "
-                    f"{ticket.get('historical_resolution')}"
-                )
-
-    # Multiple tickets
-    if state.structured_data.get("tickets"):
-        tickets_list = state.structured_data["tickets"].get(
-            "tickets",
-            [],
-        )
-
-        if tickets_list:
-            data_context += (
-                f"\nTickets for account "
-                f"({len(tickets_list)} total):"
-            )
-
-            for ticket in tickets_list[:10]:
-                data_context += (
-                    f"\n  - {ticket.get('ticket_id')}: "
-                    f"{ticket.get('status')}, "
-                    f"Subject: {ticket.get('subject')}"
-                )
-
-    # ---------------------------------------------------------
-    # Build Gemini messages
-    # ---------------------------------------------------------
+    # ========================================================
+    # LLM
+    # ========================================================
 
     messages = [
         {
@@ -788,101 +649,105 @@ def run_agent(
         },
         {
             "role": "user",
-            "content": f"""
-User query:
-{query}
-
-Data retrieved:
-{data_context if data_context else "No structured data retrieved."}
-
-Documents retrieved:
-{doc_context if doc_context else "No documents retrieved."}
-
-Conflicts:
-{json.dumps(state.conflicts) if state.conflicts else "None"}
-
-Answer the user directly and briefly using only the
-retrieved data and documents above.
-""",
+            "content": (
+                f"User query:\n{query}\n\n"
+                f"Structured data retrieved:\n"
+                f"{data_context}\n\n"
+                f"Documents retrieved:\n"
+                f"{document_context}\n\n"
+                f"Source conflicts:\n"
+                f"{conflict_context}\n\n"
+                "Answer the user's request directly using "
+                "only the retrieved information."
+            ),
         },
     ]
 
-    # ---------------------------------------------------------
-    # Gemini LLM call
-    # ---------------------------------------------------------
-
     llm_response = call_llm(messages)
 
-    # ---------------------------------------------------------
-    # State-changing actions
-    # ---------------------------------------------------------
+    # ========================================================
+    # State-changing Action Detection
+    # ========================================================
 
     query_lower = query.lower()
 
-    if any(
-        keyword in query_lower
-        for keyword in [
-            "escalat",
-            "update ticket",
-            "follow-up",
-            "follow up",
-        ]
-    ):
-        if "escalat" in query_lower:
+    wants_escalation = any(
+        phrase in query_lower
+        for phrase in (
+            "escalate",
+            "escalation",
+        )
+    )
 
-            if ticket_id:
-                action_result = create_escalation_tool(
-                    repo,
-                    user,
-                    ticket_id,
-                    reason="Customer-requested escalation",
-                    priority="high",
-                    team="Support",
-                )
+    if wants_escalation:
+        target_ticket_id = ticket_id
 
-                state.pending_actions.append(
-                    action_result
-                )
+        if not target_ticket_id:
+            ticket_result = state.structured_data.get(
+                "ticket"
+            )
 
-            elif state.structured_data.get("ticket"):
-                ticket = state.structured_data["ticket"].get(
+            if ticket_result:
+                ticket = ticket_result.get(
                     "ticket",
                     {},
                 )
 
-                if ticket:
-                    action_result = create_escalation_tool(
-                        repo,
-                        user,
-                        ticket["ticket_id"],
-                        reason="Customer-requested escalation",
-                        priority="high",
-                        team="Support",
-                    )
+                target_ticket_id = ticket.get(
+                    "ticket_id"
+                )
 
-                    state.pending_actions.append(
-                        action_result
-                    )
+        if target_ticket_id:
+            action_result = create_escalation_tool(
+                repo=repo,
+                user=user,
+                ticket_id=target_ticket_id,
+                reason="Customer-requested escalation",
+                priority="high",
+                team="Support",
+            )
 
-    # ---------------------------------------------------------
-    # Final state
-    # ---------------------------------------------------------
+            state.pending_actions.append(
+                action_result
+            )
+
+            _record_tool_call(
+                state,
+                "create_escalation",
+                action_result,
+            )
+
+            # Do not execute the action.
+            # The confirmation workflow must execute it later.
+
+    # ========================================================
+    # Final State
+    # ========================================================
 
     state.response = llm_response
 
-    state.confidence = (
-        "high"
-        if state.citations and state.structured_data
-        else "medium"
-    )
+    if state.error:
+        state.confidence = "low"
 
-    if state.conflicts:
+    elif not state.citations and not state.structured_data:
+        state.confidence = "low"
+
+    elif state.conflicts:
         state.confidence = "medium"
 
-    if (
-        not state.citations
-        and not state.structured_data
-    ):
-        state.confidence = "low"
+    elif state.citations or state.structured_data:
+        state.confidence = "high"
+
+    else:
+        state.confidence = "medium"
+
+    logger.info(
+        "Agent completed user=%s confidence=%s "
+        "citations=%s pending_actions=%s",
+        user.user_id,
+        state.confidence,
+        len(state.citations),
+        len(state.pending_actions),
+    )
 
     return state

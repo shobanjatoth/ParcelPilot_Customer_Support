@@ -6,9 +6,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.config import get_settings
-from app.data.models import init_db
+from app.data.models import init_db, SessionLocal
 from app.data.ingestion import run_ingestion
 from app.vector.store import VectorStore
+
+import os
+
+# Inside your lifespan function in app/main.py:
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_PROJECT"] = "parcelpilot-ai-agent"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,38 +24,23 @@ logging.basicConfig(
 logger = logging.getLogger("parcelpilot")
 
 vector_store_instance = None
-SessionLocal = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global vector_store_instance, SessionLocal
+    global vector_store_instance
 
     settings = get_settings()
     logger.info(f"Starting ParcelPilot | model={settings.llm_model} db={settings.database_url[:30]}")
 
-    db_url = settings.database_url
-    if db_url.startswith("sqlite"):
-        db_path = db_url.replace("sqlite:///", "")
-        if not os.path.exists(db_path):
-            SessionLocal = init_db(db_url)
-            vector_store_instance = VectorStore()
-            db = SessionLocal()
-            try:
-                run_ingestion(db, vector_store_instance)
-            finally:
-                db.close()
-        else:
-            SessionLocal = init_db(db_url)
-            vector_store_instance = VectorStore()
-    else:
-        SessionLocal = init_db(db_url)
-        vector_store_instance = VectorStore()
-        db = SessionLocal()
-        try:
-            run_ingestion(db, vector_store_instance)
-        finally:
-            db.close()
+    init_db()
+    vector_store_instance = VectorStore()
+    
+    db = SessionLocal()
+    try:
+        run_ingestion(db, vector_store_instance)
+    finally:
+        db.close()
 
     logger.info("ParcelPilot ready")
     yield

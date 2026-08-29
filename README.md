@@ -318,3 +318,10 @@ parcelpilot/
 ## License
 
 This project is licensed under the **MIT License**.
+
+
+
+
+
+#  cd frontend
+"C:\Program Files\nodejs\node.exe" ./node_modules/vite/bin/vite.js

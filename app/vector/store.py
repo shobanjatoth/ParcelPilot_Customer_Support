@@ -1,70 +1,284 @@
-import chromadb
-from typing import Optional
-from app.config import get_settings
+
+from __future__ import annotations
+
+from typing import Any
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    PointStruct,
+    VectorParams,
+)
+
+from sentence_transformers import SentenceTransformer
+
+from app.config import settings
 
 
 class VectorStore:
-    def __init__(self):
-        settings = get_settings()
-        self.client = chromadb.PersistentClient(path="./data/processed/chromadb")
-        self.collection = self.client.get_or_create_collection(
-            name="parcelpilot_docs",
-            metadata={"hnsw:space": "cosine"},
+    """
+    Qdrant Cloud vector store for ParcelPilot.
+
+    Responsibilities:
+    - Connect to Qdrant Cloud
+    - Create the document collection if required
+    - Generate embeddings
+    - Store document chunks
+    - Perform semantic search
+    """
+
+    def __init__(
+        self,
+        collection_name: str | None = None,
+    ):
+        self.collection_name = (
+            collection_name or settings.qdrant_collection
         )
 
-    def _clean_metadata(self, meta: dict) -> dict:
-        cleaned = {}
-        for k, v in meta.items():
-            if v is None:
-                cleaned[k] = ""
-            elif isinstance(v, (str, int, float, bool)):
-                cleaned[k] = v
-            else:
-                cleaned[k] = str(v)
-        return cleaned
+        # -----------------------------------------------------
+        # Embedding model
+        # -----------------------------------------------------
 
-    def add_documents(self, chunks: list[dict]):
-        ids = [c["id"] for c in chunks]
-        texts = [c["text"] for c in chunks]
-        metadatas = [self._clean_metadata(c["metadata"]) for c in chunks]
+        self.embedding_model = SentenceTransformer(
+            settings.embedding_model
+        )
 
-        batch_size = 100
-        for i in range(0, len(ids), batch_size):
-            self.collection.add(
-                ids=ids[i : i + batch_size],
-                documents=texts[i : i + batch_size],
-                metadatas=metadatas[i : i + batch_size],
+        # -----------------------------------------------------
+        # Qdrant Cloud client
+        # -----------------------------------------------------
+
+        self.client = QdrantClient(
+            url=settings.qdrant_endpoint,
+            api_key=settings.qdrant_api,
+        )
+
+        # all-MiniLM-L6-v2 → 384 dimensions
+        self.vector_size = (self.embedding_model.get_embedding_dimension())
+
+        if self.vector_size is None:
+            raise RuntimeError(
+                "Unable to determine embedding dimension."
             )
+
+        # -----------------------------------------------------
+        # Ensure collection exists
+        # -----------------------------------------------------
+
+        self._ensure_collection()
+
+    # =========================================================
+    # Collection
+    # =========================================================
+
+    def _ensure_collection(self) -> None:
+        collections = self.client.get_collections()
+
+        existing_collections = {
+            collection.name
+            for collection in collections.collections
+        }
+
+        if self.collection_name not in existing_collections:
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(
+                    size=self.vector_size,
+                    distance=Distance.COSINE,
+                ),
+            )
+
+            print(
+                f"Created Qdrant collection: "
+                f"{self.collection_name}"
+            )
+
+        else:
+            print(
+                f"Qdrant collection already exists: "
+                f"{self.collection_name}"
+            )
+
+    # =========================================================
+    # Embeddings
+    # =========================================================
+
+    def embed_text(self, text: str) -> list[float]:
+        """
+        Generate an embedding for a single text.
+        """
+
+        embedding = self.embedding_model.encode(
+            text,
+            normalize_embeddings=True,
+        )
+
+        return embedding.tolist()
+
+    def embed_documents(
+        self,
+        texts: list[str],
+    ) -> list[list[float]]:
+        """
+        Generate embeddings for multiple documents.
+        """
+
+        embeddings = self.embedding_model.encode(
+            texts,
+            normalize_embeddings=True,
+        )
+
+        return embeddings.tolist()
+
+    # =========================================================
+    # Add documents
+    # =========================================================
+
+    def add_documents(
+        self,
+        documents: list[dict[str, Any]],
+    ) -> None:
+        """
+        Add document chunks to Qdrant.
+
+        Expected format:
+
+        {
+            "id": "document:p1:c0",
+            "text": "...",
+            "metadata": {
+                "document_name": "...",
+                "page_number": 1,
+                ...
+            }
+        }
+        """
+
+        if not documents:
+            return
+
+        texts = [
+            document["text"]
+            for document in documents
+        ]
+
+        embeddings = self.embed_documents(texts)
+
+        points: list[PointStruct] = []
+
+        for document, embedding in zip(
+            documents,
+            embeddings,
+        ):
+            point_id = document["id"]
+
+            # Qdrant point IDs should preferably be UUIDs
+            # or unsigned integers. We convert the original
+            # document ID into a deterministic UUID.
+            import uuid
+
+            qdrant_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    point_id,
+                )
+            )
+
+            payload = {
+                "text": document["text"],
+                **document.get("metadata", {}),
+                "source_id": point_id,
+            }
+
+            points.append(
+                PointStruct(
+                    id=qdrant_id,
+                    vector=embedding,
+                    payload=payload,
+                )
+            )
+
+        self.client.upsert(
+            collection_name=self.collection_name,
+            points=points,
+        )
+
+        print(
+            f"Added {len(points)} documents to "
+            f"Qdrant collection '{self.collection_name}'"
+        )
+
+    # =========================================================
+    # Search
+    # =========================================================
 
     def search(
         self,
         query: str,
-        n_results: int = 10,
-        where: Optional[dict] = None,
-        where_document: Optional[dict] = None,
-    ) -> list[dict]:
-        count = self.collection.count()
-        if count == 0:
-            return []
+        top_k: int = 5,
+    ) -> list[dict[str, Any]]:
+        """
+        Perform semantic similarity search.
+        """
 
-        kwargs = {
-            "query_texts": [query],
-            "n_results": min(n_results, count),
-        }
-        if where:
-            kwargs["where"] = where
-        if where_document:
-            kwargs["where_document"] = where_document
+        query_embedding = self.embed_text(query)
 
-        results = self.collection.query(**kwargs)
+        results = self.client.query_points(
+            collection_name=self.collection_name,
+            query=query_embedding,
+            limit=top_k,
+            with_payload=True,
+        )
 
-        output = []
-        if results and results["documents"]:
-            for i, doc in enumerate(results["documents"][0]):
-                output.append({
-                    "text": doc,
-                    "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
-                    "distance": results["distances"][0][i] if results["distances"] else 0,
-                    "id": results["ids"][0][i] if results["ids"] else "",
-                })
-        return output
+        documents: list[dict[str, Any]] = []
+
+        for result in results.points:
+            payload = result.payload or {}
+
+            documents.append(
+                {
+                    "id": payload.get("source_id"),
+                    "text": payload.get("text", ""),
+                    "score": result.score,
+                    "metadata": {
+                        key: value
+                        for key, value in payload.items()
+                        if key not in {
+                            "text",
+                            "source_id",
+                        }
+                    },
+                }
+            )
+
+        return documents
+
+    # =========================================================
+    # Collection information
+    # =========================================================
+
+    def count(self) -> int:
+        """
+        Return number of vectors stored in the collection.
+        """
+
+        result = self.client.count(
+            collection_name=self.collection_name,
+            exact=True,
+        )
+
+        return result.count
+
+    def health_check(self) -> bool:
+        """
+        Check whether Qdrant is reachable.
+        """
+
+        try:
+            self.client.get_collections()
+            return True
+
+        except Exception as exc:
+            print(
+                f"Qdrant health check failed: {exc}"
+            )
+            return False

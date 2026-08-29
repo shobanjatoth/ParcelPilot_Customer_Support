@@ -1,54 +1,89 @@
-# from pydantic_settings import BaseSettings
-# from functools import lru_cache
-
-
-# class Settings(BaseSettings):
-#     llm_provider: str = "gemini"
-#     llm_model: str = "gemini-2.5-flash"
-#     openrouter_api_key: str = ""
-#     openrouter_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"  # Must have trailing slash here for Gemini
-#     database_url: str = "sqlite:///./parcelpilot.db"
-#     embedding_model: str = "all-MiniLM-L6-v2"
-#     vector_store: str = "chromadb"
-#     environment: str = "development"
-#     log_level: str = "INFO"
-
-#     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
-
-
-# @lru_cache
-# def get_settings() -> Settings:
-#     return Settings()
-
-
-
+import os
 from functools import lru_cache
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # LLM
+    # =========================================================
+    # LLM (Core Agent / Gemini Configuration)
+    # =========================================================
+
     llm_provider: str = "gemini"
-    llm_model: str = "gemini-3.5-flash"
+    llm_model: str = "gemini-3.6-flash"
 
     gemini_api_key: str = ""
-    gemini_base_url: str = (
-        "https://generativelanguage.googleapis.com/v1beta/openai"
-    )
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
 
-    # Database
-    database_url: str = "sqlite:///./parcelpilot.db"
+    # =========================================================
+    # LLM Judge / Ragas Evaluation Configuration
+    # =========================================================
 
+    eval_llm_provider: str = "gemini"
+    eval_llm_model: str = "gemini-3.6-flash"
+    gemini_judge_api_key: str = ""
+    gemini_judge_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    eval_temperature: float = 0.0
+    eval_max_tokens: int = 2048
+
+    # =========================================================
+    # PostgreSQL
+    # =========================================================
+
+    database_url: str = "postgresql+psycopg://parcelpilot:parcelpilot@localhost:5432/parcelpilot"
+
+    # =========================================================
     # Embeddings
+    # =========================================================
+
     embedding_model: str = "all-MiniLM-L6-v2"
 
-    # Vector Store
-    vector_store: str = "chromadb"
+    # =========================================================
+    # Qdrant Cloud / Vector Store
+    # =========================================================
 
+    vector_store: str = "qdrant"
+
+    qdrant_api: str = ""
+    qdrant_endpoint: str = ""
+    qdrant_collection: str = "parcelpilot_documents"
+
+    # =========================================================
     # Application
+    # =========================================================
+
     environment: str = "development"
     log_level: str = "INFO"
+
+    # =========================================================
+    # LangSmith
+    # =========================================================
+
+    langchain_tracing_v2: bool = True
+    langchain_endpoint: str = "https://api.smith.langchain.com"
+    langchain_api_key: str = ""
+    langchain_project: str = "parcelpilot-ai-agent"
+
+    # =========================================================
+    # Logfire
+    # =========================================================
+
+    logfire_token: str = ""
+
+    # =========================================================
+    # Security
+    # =========================================================
+
+    jwt_secret: str = ""
+
+    # =========================================================
+    # Frontend / CORS
+    # =========================================================
+
+    cors_origins: str = "http://localhost:5173"
+
+    # =========================================================
+    # Pydantic Settings Configuration
+    # =========================================================
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -61,3 +96,6 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+settings = get_settings()
