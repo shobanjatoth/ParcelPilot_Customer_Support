@@ -1,5 +1,4 @@
-
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 import uuid
@@ -7,32 +6,108 @@ import time
 import logging
 from datetime import datetime
 
-from app.security.auth import get_user, UserContext, is_internal, UserRole
+from app.security.auth import (
+    get_user,
+    UserContext,
+    is_internal,
+    UserRole,
+)
+
 from app.data.repository import Repository
 from app.data.models import Action, AuditLog
+
 from app.services.retrieval import RetrievalService
 from app.services.issue_detection import IssueDetectionService
+
 from app.agent.graph import run_agent, extract_ticket_id
 from app.agent.state import AgentState
+
 from app.tools.actions import confirm_action_tool
 
+from app.vector.store import VectorStore
+
+
 router = APIRouter()
+
 logger = logging.getLogger("parcelpilot")
 
+
+# ============================================================
+# Lazy Vector Store / Retrieval
+# ============================================================
+
 _retrieval_instance = None
+_vector_store_instance = None
 
 
 def _get_retrieval() -> RetrievalService:
+
     global _retrieval_instance
+    global _vector_store_instance
+
     if _retrieval_instance is None:
-        from app.main import vector_store_instance
-        _retrieval_instance = RetrievalService(vector_store_instance)
+
+        if _vector_store_instance is None:
+            _vector_store_instance = VectorStore()
+
+        _retrieval_instance = RetrievalService(
+            _vector_store_instance
+        )
+
     return _retrieval_instance
 
 
+# ============================================================
+# Database
+# ============================================================
+
 def _get_session():
-    from app.main import SessionLocal
+
+    from app.data.database import SessionLocal
+
     return SessionLocal()
+
+
+
+
+
+
+
+
+# from fastapi import APIRouter, HTTPException, Header
+# from pydantic import BaseModel
+# from typing import Optional
+# import uuid
+# import time
+# import logging
+# from datetime import datetime
+
+# from app.security.auth import get_user, UserContext, is_internal, UserRole
+# from app.data.repository import Repository
+# from app.data.models import Action, AuditLog
+# from app.services.retrieval import RetrievalService
+# from app.services.issue_detection import IssueDetectionService
+# from app.agent.graph import run_agent, extract_ticket_id
+# from app.agent.state import AgentState
+# from app.tools.actions import confirm_action_tool
+
+# router = APIRouter()
+# logger = logging.getLogger("parcelpilot")
+
+# _retrieval_instance = None
+
+
+# def _get_retrieval() -> RetrievalService:
+#     global _retrieval_instance
+#     if _retrieval_instance is None:
+#         from app.main import vector_store_instance
+#         _retrieval_instance = RetrievalService(vector_store_instance)
+#     return _retrieval_instance
+
+
+# def _get_session():
+#     from app.main import SessionLocal
+#     return SessionLocal()
 
 
 class ChatRequest(BaseModel):
