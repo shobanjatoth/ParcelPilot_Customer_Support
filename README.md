@@ -58,7 +58,7 @@ graph TD
 | Backend | FastAPI |
 | Frontend | React 18 + Vite + Tailwind CSS |
 | Agent | Custom orchestration (LangGraph-style) |
-| Database | SQLite (swappable to PostgreSQL) |
+| Database |  PostgreSQL |
 | Vector Store | qdrant |
 | LLM | Google Gemini API |
 | ORM | SQLAlchemy |
