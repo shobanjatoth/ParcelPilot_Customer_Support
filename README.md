@@ -59,7 +59,7 @@ graph TD
 | Frontend | React 18 + Vite + Tailwind CSS |
 | Agent | Custom orchestration (LangGraph-style) |
 | Database | SQLite (swappable to PostgreSQL) |
-| Vector Store | ChromaDB |
+| Vector Store | qdrant |
 | LLM | Google Gemini API |
 | ORM | SQLAlchemy |
 | PDF Parsing | PyMuPDF |
